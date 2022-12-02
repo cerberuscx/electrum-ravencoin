@@ -165,6 +165,28 @@ class ExchangeBase(Logger):
         rates = await self.get_rates('')
         return sorted([str(a) for (a, b) in rates.items() if b is not None and len(a) == 3])
 
+    def default_currencies(self) -> Sequence[str]:
+        return ['BTC', 'ETH', 'LTC', 
+                'BCH', 'BNB', 'EOS', 
+                'XRP', 'XLM', 'LINK', 
+                'DOT', 'YFI', 'USD', 
+                'AED', 'ARS', 'AUD', 
+                'BDT', 'BHD', 'BMD', 
+                'BRL', 'CAD', 'CHF', 
+                'CLP', 'CNY', 'CZK', 
+                'DKK', 'EUR', 'GBP', 
+                'HKD', 'HUF', 'IDR', 
+                'ILS', 'INR', 'JPY', 
+                'KRW', 'KWD', 'LKR', 
+                'MMK', 'MXN', 'MYR', 
+                'NGN', 'NOK', 'NZD', 
+                'PHP', 'PKR', 'PLN', 
+                'RUB', 'SAR', 'SEK', 
+                'SGD', 'THB', 'TRY', 
+                'TWD', 'UAH', 'VEF', 
+                'VND', 'ZAR', 'XDR', 
+                'XAG', 'XAU', 'BITS', 
+                'SATS']
 
 class CoinGecko(ExchangeBase):
     # Refer to https://www.coingecko.com/api/documentations/v3
@@ -187,6 +209,9 @@ class CoinGecko(ExchangeBase):
                                     '/api/v3/coins/ravencoin/market_chart?vs_currency=%s&days=max' % ccy)
         return dict([(datetime.utcfromtimestamp(d[0] / 1000).strftime('%Y-%m-%d'), to_decimal(d[1])) for d in dicts['prices']])
 
+    def default_currencies(self):
+        return []
+
 class Bittrex(ExchangeBase):
     # Refer to https://bittrex.github.io/api/v3
 
@@ -207,6 +232,10 @@ class Bittrex(ExchangeBase):
         dicts = await self.get_json('api.bittrex.com',
                                     'v3/markets/RVN-%s/candles/TRADE/DAY_1/recent' % ccy)
         return dict([(d['startsAt'][:10], to_decimal(d['close'])) for d in dicts])
+
+    def default_currencies(self):
+        return ['BTC', 'ETH', 'USD', 'USDT']
+
 
     # TODO: Add more exchange API's
 
@@ -242,23 +271,27 @@ def get_exchanges_and_currencies():
         try:
             d[name] = await exchange.get_currencies()
             print(name, "ok")
-        except:
-            d[name] = []
-            print(name, "error")
+        except Exception:
+            d[name] = exchange.default_currencies()
+            print(name, "error; using defaults")
 
     async def query_all_exchanges_for_their_ccys_over_network():
-        async with timeout_after(10):
-            async with OldTaskGroup() as group:
-                for name, klass in exchanges.items():
-                    exchange = klass(None, None)
-                    await group.spawn(get_currencies_safe(name, exchange))
+        try:
+            async with timeout_after(10):
+                async with OldTaskGroup() as group:
+                    for name, klass in exchanges.items():
+                        exchange = klass(None, None)
+                        await group.spawn(get_currencies_safe(name, exchange))
+        except Exception:
+            for name in exchanges.keys():
+                if name not in d.keys():
+                    print('timeout; using defaults')
+                    d[name] = exchange.default_currencies()
+
 
     #loop = util.get_asyncio_loop()
-    try:
-        #loop.run_until_complete(query_all_exchanges_for_their_ccys_over_network())
-        asyncio.run(query_all_exchanges_for_their_ccys_over_network())
-    except Exception:
-        pass
+    #loop.run_until_complete(query_all_exchanges_for_their_ccys_over_network())
+    asyncio.run(query_all_exchanges_for_their_ccys_over_network())
     with open(path, 'w', encoding='utf-8') as f:
         f.write(json.dumps(d, indent=4, sort_keys=True))
     return d
