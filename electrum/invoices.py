@@ -128,24 +128,40 @@ class Invoice(StoredObject):
 
     def get_address(self) -> Optional[str]:
         """returns the first address, to be displayed in GUI"""
-        if self.is_lightning():
-            return self._lnaddr.get_fallback_address() or None
-        else:
-            return self.outputs[0].address
+        address = None
+        if self.outputs:
+            address = self.outputs[0].address if len(self.outputs) > 0 else None
+        if not address and self.is_lightning():
+            address = self._lnaddr.get_fallback_address() or None
+        return address
 
     def get_outputs(self):
         if self.is_lightning():
             address = self.get_address()
-            outputs = [PartialTxOutput.from_address_and_value(address, int(self.get_amount_sat()))] if address else []
+            amount = self.get_amount_sat()
+            if address and amount is not None:
+                outputs = [PartialTxOutput.from_address_and_value(address, int(amount))]
+            else:
+                outputs = []
         else:
             outputs = self.outputs
         return outputs
+
+    def can_be_paid_onchain(self) -> bool:
+        if self.is_lightning():
+            return bool(self._lnaddr.get_fallback_address())
+        else:
+            return True
 
     def get_expiration_date(self):
         # 0 means never
         return self.exp + self.time if self.exp else 0
 
-    def get_amount_msat(self) -> Union[RavenValue, None]:
+    def has_expired(self) -> bool:
+        exp = self.get_expiration_date()
+        return bool(exp) and exp < time.time()
+
+    def get_amount_msat(self) -> Union[RavenValue, str, None]:
         return self.amount_msat
 
     def get_time(self):
@@ -164,7 +180,7 @@ class Invoice(StoredObject):
             return amount_msat
         return amount_msat // 1000
 
-    def get_bip21_URI(self, lightning=None):
+    def get_bip21_URI(self, *, include_lightning: bool = False) -> Optional[str]:
         from electrum.util import create_bip21_uri
         addr = self.get_address()
         amount = self.get_amount_sat()
@@ -174,13 +190,15 @@ class Invoice(StoredObject):
         message = self.message
         extra = {}
         if self.time and self.exp:
-            extra['time'] = str(self.time)
-            extra['exp'] = str(self.exp)
-        # only if we can receive
+            extra['time'] = str(int(self.time))
+            extra['exp'] = str(int(self.exp))
+        lightning = self.lightning_invoice if include_lightning else None
         if lightning:
             extra['lightning'] = lightning
         if not addr and lightning:
-            return "bitcoin:?lightning="+lightning
+            return "raven:?lightning="+lightning
+        if not addr and not lightning:
+            return None
         uri = create_bip21_uri(addr, amount, message, extra_query_params=extra)
         return str(uri)
 

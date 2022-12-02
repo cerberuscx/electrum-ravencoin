@@ -18,7 +18,7 @@ from electrum import lnutil
 from electrum.plugin import run_hook
 from electrum.i18n import _
 from electrum.ravencoin import COIN
-from electrum.util import (AssetAmountModified, UserFacingException, get_asyncio_loop, bh2u,
+from electrum.util import (AssetAmountModified, UserFacingException, get_asyncio_loop, bh2u, FailedToParsePaymentIdentifier,
                            InvalidBitcoinURI, maybe_extract_lightning_payment_identifier, NotEnoughFunds,
                            NoDynamicFeeEstimates, InvoiceError, parse_max_spend, RavenValue)
 from electrum.invoices import PR_PAID, Invoice
@@ -28,8 +28,8 @@ from electrum.logging import Logger
 from electrum.lnaddr import lndecode, LnInvoiceException
 from electrum.lnurl import decode_lnurl, request_lnurl, callback_lnurl, LNURLError, LNURL6Data
 
-from .amountedit import AmountEdit, PayToAmountEdit, SizedFreezableLineEdit
-from .util import WaitingDialog, HelpLabel, MessageBoxMixin, EnterButton
+from .amountedit import AmountEdit, PayToAmountEdit, SizedFreezableLineEdit, RVNAmountEdit
+from .util import WaitingDialog, HelpLabel, MessageBoxMixin, EnterButton, char_width_in_lineedit
 from .confirm_tx_dialog import ConfirmTxDialog
 from .transaction_dialog import PreviewTxDialog
 
@@ -198,7 +198,8 @@ class SendTab(QWidget, MessageBoxMixin, Logger):
         self.window.connect_fields(self.amount_e, self.fiat_send_e)
 
         self.max_button = EnterButton(_("Max"), self.spend_max)
-        self.max_button.setFixedWidth(100)
+        btn_width = 10 * char_width_in_lineedit()
+        self.max_button.setFixedWidth(btn_width)
         self.max_button.setCheckable(True)
         grid.addWidget(self.max_button, 4, 4)
 
@@ -583,7 +584,7 @@ class SendTab(QWidget, MessageBoxMixin, Logger):
         label = out.get('label')
         message = out.get('message')
         lightning = out.get('lightning')
-        if lightning:
+        if lightning and (self.wallet.has_lightning() or not address):
             self.handle_payment_identifier(lightning, can_use_network=can_use_network)
             return
         # use label as description (not BIP21 compliant)
@@ -617,12 +618,13 @@ class SendTab(QWidget, MessageBoxMixin, Logger):
         elif text.lower().startswith(util.BITCOIN_BIP21_URI_SCHEME + ':'):
             self.set_bip21(text, can_use_network=can_use_network)
         else:
-            raise ValueError("Could not handle payment identifier.")
+            truncated_text = f"{text[:100]}..." if len(text) > 100 else text
+            raise FailedToParsePaymentIdentifier(f"Could not handle payment identifier:\n{truncated_text}")
         # update fiat amount
         self.amount_e.textEdited.emit("")
         self.window.show_send_tab()
 
-    def read_invoice(self):
+    def read_invoice(self) -> Optional[Invoice]:
         if self.check_send_tab_payto_line_and_show_errors():
             return
         try:
@@ -630,9 +632,6 @@ class SendTab(QWidget, MessageBoxMixin, Logger):
                 raise UserFacingException(_('Only on-chain invoices are currently supported'))
                 invoice_str = self.payto_e.lightning_invoice
                 if not invoice_str:
-                    return
-                if not self.wallet.has_lightning():
-                    self.show_error(_('Lightning is disabled'))
                     return
                 invoice = Invoice.from_bech32(invoice_str)
                 if invoice.amount_msat is None:
@@ -642,6 +641,9 @@ class SendTab(QWidget, MessageBoxMixin, Logger):
                     else:
                         self.show_error(_('No amount'))
                         return
+                if not self.wallet.has_lightning() and not invoice.can_be_paid_onchain():
+                    self.show_error(_('Lightning is disabled'))
+                    return
                 return invoice
             else:
                 outputs = self.read_outputs()
@@ -811,19 +813,22 @@ class SendTab(QWidget, MessageBoxMixin, Logger):
 
     def pay_lightning_invoice(self, invoice: Invoice):
         amount_sat = invoice.get_amount_sat()
-        key = self.wallet.get_key_for_outgoing_invoice(invoice)
         if amount_sat is None:
             raise Exception("missing amount for LN invoice")
-        if not self.wallet.lnworker.can_pay_invoice(invoice):
-            num_sats_can_send = int(self.wallet.lnworker.num_sats_can_send())
-            lightning_needed = amount_sat - num_sats_can_send
-            lightning_needed += (lightning_needed // 20) # operational safety margin
+        # note: lnworker might be None if LN is disabled,
+        #       in which case we should still offer the user to pay onchain.
+        lnworker = self.wallet.lnworker
+        if lnworker is None or not lnworker.can_pay_invoice(invoice):
             coins = self.window.get_coins(nonlocal_only=True)
-            can_pay_onchain = invoice.get_address() and self.wallet.can_pay_onchain(invoice.get_outputs(), coins=coins)
-            can_pay_with_new_channel = self.wallet.lnworker.suggest_funding_amount(amount_sat, coins=coins)
-            can_pay_with_swap = self.wallet.lnworker.suggest_swap_to_send(amount_sat, coins=coins)
-            rebalance_suggestion = self.wallet.lnworker.suggest_rebalance_to_send(amount_sat)
-            can_rebalance = bool(rebalance_suggestion) and self.window.num_tasks() == 0
+            can_pay_onchain = invoice.can_be_paid_onchain() and self.wallet.can_pay_onchain(invoice.get_outputs(), coins=coins)
+            can_pay_with_new_channel = False
+            can_pay_with_swap = False
+            can_rebalance = False
+            if lnworker:
+                can_pay_with_new_channel = lnworker.suggest_funding_amount(amount_sat, coins=coins)
+                can_pay_with_swap = lnworker.suggest_swap_to_send(amount_sat, coins=coins)
+                rebalance_suggestion = lnworker.suggest_rebalance_to_send(amount_sat)
+                can_rebalance = bool(rebalance_suggestion) and self.window.num_tasks() == 0
             choices = {}
             if can_rebalance:
                 msg = ''.join([
@@ -849,11 +854,13 @@ class SendTab(QWidget, MessageBoxMixin, Logger):
                     _('Funds will be sent to the invoice fallback address.')
                 ])
                 choices[3] = msg
-            if not choices:
-                raise NotEnoughFunds()
             msg = _('You cannot pay that invoice using Lightning.')
-            if self.wallet.lnworker.channels:
-                msg += '\n' + _('Your channels can send {}.').format(self.format_amount(num_sats_can_send) + self.base_unit())
+            if lnworker and lnworker.channels:
+                num_sats_can_send = int(lnworker.num_sats_can_send())
+                msg += '\n' + _('Your channels can send {}.').format(self.format_amount(num_sats_can_send) + ' ' + self.base_unit())
+            if not choices:
+                self.window.show_error(msg)
+                return
             r = self.window.query_choice(msg, choices)
             if r is not None:
                 self.save_pending_invoice()
@@ -870,13 +877,14 @@ class SendTab(QWidget, MessageBoxMixin, Logger):
                     self.pay_onchain_dialog(coins, invoice.get_outputs())
             return
 
+        assert lnworker is not None
         # FIXME this is currently lying to user as we truncate to satoshis
         amount_msat = invoice.get_amount_msat()
         msg = _("Pay lightning invoice?") + '\n\n' + _("This will send {}?").format(self.format_amount_and_units(Decimal(amount_msat)/1000))
         if not self.question(msg):
             return
         self.save_pending_invoice()
-        coro = self.wallet.lnworker.pay_invoice(invoice.lightning_invoice, amount_msat=amount_msat)
+        coro = lnworker.pay_invoice(invoice.lightning_invoice, amount_msat=amount_msat)
         self.window.run_coroutine_from_thread(coro, _('Sending payment'))
 
     def broadcast_transaction(self, tx: Transaction):

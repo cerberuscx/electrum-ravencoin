@@ -1332,7 +1332,7 @@ def parse_URI(uri: str, on_pr: Callable = None, *, loop=None) -> dict:
     """Raises InvalidBitcoinURI on malformed URI."""
     from . import ravencoin
     from .ravencoin import COIN, TOTAL_COIN_SUPPLY_LIMIT_IN_BTC
-    from .lnaddr import lndecode
+    from .lnaddr import lndecode, LnDecodeException
 
     if not isinstance(uri, str):
         raise InvalidBitcoinURI(f"expected string, not {repr(uri)}")
@@ -1398,14 +1398,18 @@ def parse_URI(uri: str, on_pr: Callable = None, *, loop=None) -> dict:
     if 'lightning' in out:
         try:
             lnaddr = lndecode(out['lightning'])
-            amount_sat = out.get('amount')
-            if amount_sat:
-                assert int(lnaddr.get_amount_sat()) == amount_sat
-            address = out.get('address')
-            if address:
-                assert lnaddr.get_fallback_address() == address
-        except Exception as e:
-            raise InvalidBitcoinURI(f"Inconsistent lightning field: {repr(e)}") from e
+        except LnDecodeException as e:
+            raise InvalidBitcoinURI(f"Failed to decode 'lightning' field: {e!r}") from e
+        amount_sat = out.get('amount')
+        if amount_sat:
+            # allow small leeway due to msat precision
+            if abs(amount_sat - int(lnaddr.get_amount_sat())) > 1:
+                raise InvalidBitcoinURI("Inconsistent lightning field in bip21: amount")
+        address = out.get('address')
+        ln_fallback_addr = lnaddr.get_fallback_address()
+        if address and ln_fallback_addr:
+            if ln_fallback_addr != address:
+                raise InvalidBitcoinURI("Inconsistent lightning field in bip21: address")
 
     r = out.get('r')
     sig = out.get('sig')
@@ -1472,6 +1476,10 @@ def is_uri(data: str) -> bool:
             data.startswith(BITCOIN_BIP21_URI_SCHEME + ':')):
         return True
     return False
+
+
+class FailedToParsePaymentIdentifier(Exception):
+    pass
 
 
 # Python bug (http://bugs.python.org/issue1927) causes raw_input
@@ -1557,13 +1565,36 @@ def write_json_file(path, data):
         raise FileExportFailed(e)
 
 
+def os_chmod(path, mode):
+    """os.chmod aware of tmpfs"""
+    try:
+        os.chmod(path, mode)
+    except OSError as e:
+        xdg_runtime_dir = os.environ.get("XDG_RUNTIME_DIR", None)
+        if xdg_runtime_dir and is_subpath(path, xdg_runtime_dir):
+            _logger.info(f"Tried to chmod in tmpfs. Skipping... {e!r}")
+        else:
+            raise
+
+
 def make_dir(path, allow_symlink=True):
     """Make directory if it does not yet exist."""
     if not os.path.exists(path):
         if not allow_symlink and os.path.islink(path):
             raise Exception('Dangling link: ' + path)
         os.mkdir(path)
-        os.chmod(path, stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR)
+        os_chmod(path, stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR)
+
+
+def is_subpath(long_path: str, short_path: str) -> bool:
+    """Returns whether long_path is a sub-path of short_path."""
+    try:
+        common = os.path.commonpath([long_path, short_path])
+    except ValueError:
+        return False
+    short_path = standardize_path(short_path)
+    common     = standardize_path(common)
+    return short_path == common
 
 
 def log_exceptions(func):
@@ -1667,6 +1698,7 @@ class OldTaskGroup(aiorpcx.TaskGroup):
         await group.spawn(task1())
         await group.spawn(task2())
     ```
+    # TODO see if we can migrate to asyncio.timeout, introduced in python 3.11, and use stdlib instead of aiorpcx.curio...
     """
     async def join(self):
         if self._wait is all:
@@ -1703,6 +1735,7 @@ class OldTaskGroup(aiorpcx.TaskGroup):
 # see https://github.com/kyuupichan/aiorpcX/issues/44
 # see https://github.com/aio-libs/async-timeout/issues/229
 # see https://bugs.python.org/issue42130 and https://bugs.python.org/issue45098
+# TODO see if we can migrate to asyncio.timeout, introduced in python 3.11, and use stdlib instead of aiorpcx.curio...
 def _aiorpcx_monkeypatched_set_new_deadline(task, deadline):
     def timeout_task():
         task._orig_cancel()
@@ -1716,7 +1749,26 @@ def _aiorpcx_monkeypatched_set_new_deadline(task, deadline):
         task.cancel = mycancel
     task._deadline_handle = task._loop.call_at(deadline, timeout_task)
 
-aiorpcx.curio._set_new_deadline = _aiorpcx_monkeypatched_set_new_deadline
+
+def _aiorpcx_monkeypatched_set_task_deadline(task, deadline):
+    ret = _aiorpcx_orig_set_task_deadline(task, deadline)
+    task._externally_cancelled = None
+    return ret
+
+
+def _aiorpcx_monkeypatched_unset_task_deadline(task):
+    if hasattr(task, "_orig_cancel"):
+        task.cancel = task._orig_cancel
+        del task._orig_cancel
+    return _aiorpcx_orig_unset_task_deadline(task)
+
+
+_aiorpcx_orig_set_task_deadline    = aiorpcx.curio._set_task_deadline
+_aiorpcx_orig_unset_task_deadline  = aiorpcx.curio._unset_task_deadline
+
+aiorpcx.curio._set_new_deadline    = _aiorpcx_monkeypatched_set_new_deadline
+aiorpcx.curio._set_task_deadline   = _aiorpcx_monkeypatched_set_task_deadline
+aiorpcx.curio._unset_task_deadline = _aiorpcx_monkeypatched_unset_task_deadline
 
 
 class NetworkJobOnDefaultServer(Logger, ABC):
@@ -2055,12 +2107,12 @@ class EventListener:
 
     def register_callbacks(self):
         for name, method in self._list_callbacks():
-            _logger.info(f'registering callback {method}')
+            #_logger.debug(f'registering callback {method}')
             register_callback(method, [name])
 
     def unregister_callbacks(self):
         for name, method in self._list_callbacks():
-            _logger.info(f'unregistering callback {method}')
+            #_logger.debug(f'unregistering callback {method}')
             unregister_callback(method)
 
 

@@ -52,7 +52,7 @@ if TYPE_CHECKING:
 
 OLD_SEED_VERSION = 4        # electrum versions < 2.0
 NEW_SEED_VERSION = 11       # electrum versions >= 2.0
-FINAL_SEED_VERSION = 48     # electrum >= 2.7 will set this to prevent
+FINAL_SEED_VERSION = 50     # electrum >= 2.7 will set this to prevent
                             # old versions from overwriting new format
                             # Rewrites wallet to support assets
 
@@ -197,6 +197,8 @@ class WalletDB(JsonDB):
         self._convert_version_46()
         self._convert_version_47()
         self._convert_version_48()
+        self._convert_version_49()
+        self._convert_version_50()
         self.put('seed_version', FINAL_SEED_VERSION)  # just to be sure
 
         self._after_upgrade_tasks()
@@ -973,14 +975,15 @@ class WalletDB(JsonDB):
                     'bip70':bip70,
                     'lightning_invoice':lightning_invoice,
                 }
-        
+        self.data['seed_version'] = 47
+    
+    def _convert_invoices_keys(self, invoices):
         # recalc keys of outgoing on-chain invoices
+        from .crypto import sha256d
         def get_id_from_onchain_outputs(raw_outputs, timestamp):
             outputs = [PartialTxOutput.from_legacy_tuple(*output) for output in raw_outputs]
             outputs_str = "\n".join(f"{txout.scriptpubkey.hex()}, {txout.value}" for txout in outputs)
             return sha256d(outputs_str + "%d" % timestamp).hex()[0:10]
-
-        invoices = self.data.get('invoices', {})
         for key, item in list(invoices.items()):
             is_lightning = item['lightning_invoice'] is not None
             if is_lightning:
@@ -992,12 +995,13 @@ class WalletDB(JsonDB):
             if newkey != key:
                 invoices[newkey] = item
                 del invoices[key]
-        self.data['seed_version'] = 47
 
-    def _convert_version_47(self):
+    def _convert_version_48(self):
         from .lnaddr import lndecode
-        if not self._is_upgrade_method_needed(46, 46):
+        if not self._is_upgrade_method_needed(47, 47):
             return
+        invoices = self.data.get('invoices', {})
+        self._convert_invoices_keys(invoices)
         # recalc keys of requests
         requests = self.data.get('payment_requests', {})
         for key, item in list(requests.items()):
@@ -1008,13 +1012,7 @@ class WalletDB(JsonDB):
                 if key != rhash:
                     requests[rhash] = item
                     del requests[key]
-        self.data['seed_version'] = 47
 
-    def _convert_version_48(self):
-        # fix possible corruption of invoice amounts, see #7774
-        if not self._is_upgrade_method_needed(47, 47):
-            return
-        invoices = self.data.get('invoices', {})
         invoices_new = {}
         for key, item in list(invoices.items()):
             if item['amount_msat'] == 1000 * "!":
@@ -1023,6 +1021,29 @@ class WalletDB(JsonDB):
         invoices.clear()
         invoices.update(invoices_new)
         self.data['seed_version'] = 48
+
+    def _convert_version_49(self):
+        if not self._is_upgrade_method_needed(48, 48):
+            return
+        channels = self.data.get('channels', {})
+        legacy_chans = [chan_dict for chan_dict in channels.values()
+                        if chan_dict['channel_type'] == ChannelType.OPTION_LEGACY_CHANNEL]
+        if legacy_chans:
+            raise WalletFileException(
+                f"This wallet contains {len(legacy_chans)} lightning channels of type 'LEGACY'. "
+                f"These channels were created using unreleased development versions of Electrum "
+                f"before the first lightning-capable release of 4.0, and are not supported anymore. "
+                f"Please use Electrum 4.3.0 to open this wallet, close the channels, "
+                f"and delete them from the wallet."
+            )
+        self.data['seed_version'] = 49
+
+    def _convert_version_50(self):
+        if not self._is_upgrade_method_needed(49, 49):
+            return
+        requests = self.data.get('payment_requests', {})
+        self._convert_invoices_keys(requests)
+        self.data['seed_version'] = 50
 
     def _convert_imported(self):
         if not self._is_upgrade_method_needed(0, 13):
@@ -1462,14 +1483,6 @@ class WalletDB(JsonDB):
     def remove_tx_fee(self, txid: str) -> None:
         assert isinstance(txid, str)
         self.tx_fees.pop(txid, None)
-
-    @locked
-    def get_dict(self, name) -> dict:
-        # Warning: interacts un-intuitively with 'put': certain parts
-        # of 'data' will have pointers saved as separate variables.
-        if name not in self.data:
-            self.data[name] = {}
-        return self.data[name]
 
     @locked
     def num_change_addresses(self) -> int:

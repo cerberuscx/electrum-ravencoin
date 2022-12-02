@@ -86,7 +86,6 @@ class ElectrumGui(BaseElectrumGui, EventListener):
         self.tab = 0
         self.pos = 0
         self.popup_pos = 0
-        self.qr_mode = 0
 
         self.str_recipient = ""
         self.str_description = ""
@@ -104,6 +103,8 @@ class ElectrumGui(BaseElectrumGui, EventListener):
         self.num_tabs = len(self.tab_names)
         self.need_update = False
 
+    def stop(self):
+        self.tab = -1
 
     @event_listener
     def on_event_wallet_updated(self, wallet):
@@ -234,29 +235,11 @@ class ElectrumGui(BaseElectrumGui, EventListener):
             self.buttons[self.pos]()
         elif self.pos >= 5 and c == 10:
             key = self.requests[self.pos - 5]
-            self.show_request_menu(key)
+            self.show_request(key)
 
     def question(self, msg):
         out = self.run_popup(msg, ["No", "Yes"]).get('button')
         return out == "Yes"
-
-    def show_request_menu(self, key):
-        req = self.wallet.get_request(key)
-        addr = req.get_address() or ''
-        URI = req.get_bip21_URI()
-        lnaddr = req.lightning_invoice or ''
-        out = self.run_popup('Request', ["View", "Copy address", "Copy URI", "Copy Lightning Invoice", "Delete"]).get('button')
-        if out == "Delete":
-            self.wallet.delete_request(key)
-            self.max_pos -= 1
-        elif out == "Copy address":
-            pyperclip.copy(addr)
-        elif out == "Copy URI":
-            pyperclip.copy(URI)
-        elif out == "Copy Lightning Invoice":
-            pyperclip.copy(lnaddr)
-        elif out == "View":
-            self.show_request(key)
 
     def show_invoice_menu(self):
         key = self.invoices[self.pos - 7]
@@ -284,7 +267,7 @@ class ElectrumGui(BaseElectrumGui, EventListener):
         fmt = self.format_column_width(x, [-20, '*', 15, 25])
         headers = fmt % ("Date", "Description", "Amount", "Status")
         for req in self.wallet.get_unpaid_invoices():
-            key = self.wallet.get_key_for_outgoing_invoice(req)
+            key = req.get_id()
             status = self.wallet.get_invoice_status(req)
             status_str = req.get_status_str(status)
             timestamp = req.get_time()
@@ -304,8 +287,8 @@ class ElectrumGui(BaseElectrumGui, EventListener):
         fmt = self.format_column_width(x, [-20, '*', 15, 25])
         headers = fmt % ("Date", "Description", "Amount", "Status")
         for req in self.wallet.get_unpaid_requests():
-            key = self.wallet.get_key_for_receive_request(req)
-            status = self.wallet.get_request_status(key)
+            key = req.get_id()
+            status = self.wallet.get_invoice_status(req)
             status_str = req.get_status_str(status)
             timestamp = req.get_time()
             date = format_time(timestamp)
@@ -327,7 +310,7 @@ class ElectrumGui(BaseElectrumGui, EventListener):
         fmt = self.format_column_width(x, [-50, '*', 15])
         messages = [ fmt % (
             addr,
-            self.wallet.get_label(addr),
+            self.wallet.get_label_for_address(addr),
             self.config.format_amount(sum(self.wallet.get_addr_balance(addr)), whitespaces=True)
         ) for addr in self.wallet.get_addresses() ]
         self.print_list(2, x, messages, fmt % ("Address", "Description", "Balance"))
@@ -338,7 +321,7 @@ class ElectrumGui(BaseElectrumGui, EventListener):
         utxos = self.wallet.get_utxos()
         messages = [ fmt % (
             utxo.prevout.to_str(),
-            self.wallet.get_label(utxo.prevout.txid.hex()),
+            self.wallet.get_label_for_txid(utxo.prevout.txid.hex()),
             self.config.format_amount(utxo.value_sats(), whitespaces=True)
         ) for utxo in utxos]
         self.print_list(2, x, sorted(messages), fmt % ("Outpoint", "Description", "Balance"))
@@ -448,6 +431,8 @@ class ElectrumGui(BaseElectrumGui, EventListener):
                 return c
             if self.need_update and redraw:
                 self.update()
+            if self.tab == -1:
+                return 27
 
     def main_command(self):
         c = self.getch(redraw=True)
@@ -858,43 +843,43 @@ class ElectrumGui(BaseElectrumGui, EventListener):
                     break
         return out
 
-    def print_textbox(self, w, y, x, _text, pos):
+    def print_textbox(self, w, y, x, _text, highlighted):
         width = 60
         for i in range(len(_text)//width + 1):
             s = _text[i*width:(i+1)*width]
-            w.addstr(y+i, x, s, curses.A_REVERSE if self.qr_mode == pos else curses.A_NORMAL)
+            w.addstr(y+i, x, s, curses.A_REVERSE if highlighted else curses.A_NORMAL)
         return i
 
     def show_request(self, key):
         req = self.wallet.get_request(key)
         addr = req.get_address() or ''
-        URI = req.get_bip21_URI()
+        URI = self.wallet.get_request_URI(req) or ''
         lnaddr = req.lightning_invoice or ''
-        self.w = curses.newwin(self.maxy - 2, self.maxx - 2, 1, 1)
-        w = self.w
+        w = curses.newwin(self.maxy - 2, self.maxx - 2, 1, 1)
+        pos = 4
         while True:
-            if self.qr_mode == 0:
-                text = addr
-                data = addr
-            elif self.qr_mode == 1:
+            if pos == 1:
                 text = URI
                 data = URI
-            elif self.qr_mode == 2:
+            elif pos == 2:
                 text = lnaddr
                 data = lnaddr.upper()
+            else:
+                text = addr
+                data = addr
 
             w.clear()
             w.border(0)
             w.addstr(0, 2, ' ' + _('Payment Request') + ' ')
             y = 2
             w.addstr(y, 2, "Address")
-            h1 = self.print_textbox(w, y, 13, addr, 0)
+            h1 = self.print_textbox(w, y, 13, addr, pos==0)
             y += h1 + 2
             w.addstr(y, 2, "URI")
-            h2 = self.print_textbox(w, y, 13, URI, 1)
+            h2 = self.print_textbox(w, y, 13, URI, pos==1)
             y += h2 + 2
             w.addstr(y, 2, "Lightning")
-            h3 = self.print_textbox(w, y, 13, lnaddr, 2)
+            h3 = self.print_textbox(w, y, 13, lnaddr, pos==2)
             y += h3 + 2
             lines = self.get_qr(data)
             qr_width = len(lines) * 2
@@ -902,19 +887,28 @@ class ElectrumGui(BaseElectrumGui, EventListener):
             if x > 60:
                 self.print_qr(w, 1, x, lines)
             else:
-                w.addstr(y, 2, "Window too small for qr code")
+                w.addstr(y, 35, "(Window too small for QR code)")
+            w.addstr(y, 13, "[Delete]", curses.A_REVERSE if pos==3 else curses.color_pair(2))
+            w.addstr(y, 25, "[Close]", curses.A_REVERSE if pos==4 else curses.color_pair(2))
             w.refresh()
             c = self.getch()
             if c in [curses.KEY_UP]:
-                self.qr_mode -= 1
+                pos -= 1
             elif c in [curses.KEY_DOWN, 9]:
-                self.qr_mode +=1
-            elif c == ord(' '):
-                pyperclip.copy(text)
-                self.print_clipboard()
+                pos +=1
+            elif c == 10:
+                if pos in [0,1,2]:
+                    pyperclip.copy(text)
+                    self.show_message('Text copied to clipboard')
+                elif pos == 3:
+                    if self.question("Delete Request?"):
+                        self.wallet.delete_request(key)
+                        self.max_pos -= 1
+                        break
+                elif pos ==4:
+                    break
             else:
                 break
-            self.qr_mode = self.qr_mode % 3
-
+            pos = pos % 5
         self.stdscr.refresh()
         return

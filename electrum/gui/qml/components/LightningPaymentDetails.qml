@@ -12,7 +12,7 @@ Pane {
     width: parent.width
     height: parent.height
 
-    property string title: qsTr("Lightning payment details")
+    // property string title: qsTr("Lightning payment details")
 
     property string key
 
@@ -30,6 +30,20 @@ Pane {
             id: rootLayout
             width: parent.width
             columns: 2
+
+            Label {
+                Layout.columnSpan: 2
+                text: qsTr('Lightning payment details')
+                font.pixelSize: constants.fontSizeLarge
+                color: Material.accentColor
+            }
+
+            Rectangle {
+                Layout.columnSpan: 2
+                Layout.fillWidth: true
+                height: 1
+                color: Material.accentColor
+            }
 
             Label {
                 text: qsTr('Status')
@@ -168,7 +182,9 @@ Pane {
                         icon.source: '../../icons/share.png'
                         icon.color: 'transparent'
                         onClicked: {
-                            var dialog = share.createObject(root, { 'title': qsTr('Payment hash'), 'text': lnpaymentdetails.payment_hash })
+                            var dialog = app.genericShareDialog.createObject(root,
+                                { title: qsTr('Payment hash'), text: lnpaymentdetails.payment_hash }
+                            )
                             dialog.open()
                         }
                     }
@@ -200,7 +216,9 @@ Pane {
                         icon.source: '../../icons/share.png'
                         icon.color: 'transparent'
                         onClicked: {
-                            var dialog = share.createObject(root, { 'title': qsTr('Preimage'), 'text': lnpaymentdetails.preimage })
+                            var dialog = app.genericShareDialog.createObject(root,
+                                { title: qsTr('Preimage'), text: lnpaymentdetails.preimage }
+                            )
                             dialog.open()
                         }
                     }
@@ -235,7 +253,9 @@ Pane {
                         icon.color: enabled ? 'transparent' : constants.mutedForeground
                         enabled: lnpaymentdetails.invoice != ''
                         onClicked: {
-                            var dialog = share.createObject(root, { 'title': qsTr('Lightning Invoice'), 'text': lnpaymentdetails.invoice })
+                            var dialog = app.genericShareDialog.createObject(root,
+                                { title: qsTr('Lightning Invoice'), text: lnpaymentdetails.invoice }
+                            )
                             dialog.open()
                         }
                     }
@@ -251,11 +271,6 @@ Pane {
         wallet: Daemon.currentWallet
         key: root.key
         onLabelChanged: root.detailsChanged()
-    }
-
-    Component {
-        id: share
-        GenericShareDialog {}
     }
 
 }

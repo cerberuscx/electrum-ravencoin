@@ -1,12 +1,10 @@
-from datetime import datetime, timedelta
-
-from PyQt5.QtCore import pyqtProperty, pyqtSignal, pyqtSlot, QObject, Q_ENUMS
 from PyQt5.QtCore import Qt, QAbstractListModel, QModelIndex
+from PyQt5.QtCore import pyqtProperty, pyqtSignal, pyqtSlot
 
+from electrum.lnchannel import ChannelState
+from electrum.lnutil import LOCAL, REMOTE
 from electrum.logging import get_logger
 from electrum.util import Satoshis
-from electrum.lnutil import LOCAL, REMOTE
-from electrum.lnchannel import ChannelState
 
 from .qetypes import QEAmount
 from .util import QtEventListener, qt_event_listener
@@ -17,7 +15,8 @@ class QEChannelListModel(QAbstractListModel, QtEventListener):
     # define listmodel rolemap
     _ROLE_NAMES=('cid','state','state_code','initiator','capacity','can_send',
                  'can_receive','l_csv_delay','r_csv_delay','send_frozen','receive_frozen',
-                 'type','node_id','node_alias','short_cid','funding_tx','is_trampoline')
+                 'type','node_id','node_alias','short_cid','funding_tx','is_trampoline',
+                 'is_backup')
     _ROLE_KEYS = range(Qt.UserRole, Qt.UserRole + len(_ROLE_NAMES))
     _ROLE_MAP  = dict(zip(_ROLE_KEYS, [bytearray(x.encode()) for x in _ROLE_NAMES]))
     _ROLE_RMAP = dict(zip(_ROLE_NAMES, _ROLE_KEYS))
@@ -40,12 +39,6 @@ class QEChannelListModel(QAbstractListModel, QtEventListener):
     def on_event_channel(self, wallet, channel):
         if wallet == self.wallet:
             self.on_channel_updated(channel)
-
-    #    elif event == 'channels_updated':
-    @qt_event_listener
-    def on_event_channels_updated(self, wallet):
-        if wallet == self.wallet:
-            self.init_model() # TODO: remove/add less crude than full re-init
 
     def on_destroy(self):
         self.unregister_callbacks()
@@ -75,14 +68,20 @@ class QEChannelListModel(QAbstractListModel, QtEventListener):
         lnworker = self.wallet.lnworker
         item = {}
         item['cid'] = lnc.channel_id.hex()
-        item['node_alias'] = lnworker.get_node_alias(lnc.node_id) or lnc.node_id.hex()
+        item['node_id'] = lnc.node_id.hex()
+        item['node_alias'] = lnworker.get_node_alias(lnc.node_id) or ''
         item['short_cid'] = lnc.short_id_for_GUI()
         item['state'] = lnc.get_state_for_GUI()
         item['state_code'] = int(lnc.get_state())
-        item['capacity'] = QEAmount(amount_sat=lnc.get_capacity())
-        item['can_send'] = QEAmount(amount_msat=lnc.available_to_spend(LOCAL))
-        item['can_receive'] = QEAmount(amount_msat=lnc.available_to_spend(REMOTE))
+        item['is_backup'] = lnc.is_backup()
         item['is_trampoline'] = lnworker.is_trampoline_peer(lnc.node_id)
+        item['capacity'] = QEAmount(amount_sat=lnc.get_capacity())
+        if lnc.is_backup():
+            item['can_send'] = QEAmount()
+            item['can_receive'] = QEAmount()
+        else:
+            item['can_send'] = QEAmount(amount_msat=lnc.available_to_spend(LOCAL))
+            item['can_receive'] = QEAmount(amount_msat=lnc.available_to_spend(REMOTE))
         return item
 
     numOpenChannelsChanged = pyqtSignal()
@@ -101,9 +100,6 @@ class QEChannelListModel(QAbstractListModel, QtEventListener):
 
         lnchannels = self.wallet.lnworker.get_channel_objects()
         for channel in lnchannels.values():
-            if channel.is_backup():
-                # not implemented
-                continue
             item = self.channel_to_model(channel)
             channels.append(item)
 
@@ -126,6 +122,7 @@ class QEChannelListModel(QAbstractListModel, QtEventListener):
             i = i + 1
 
     def do_update(self, modelindex, channel):
+        self._logger.debug(f'updating our channel {channel.short_id_for_GUI()}')
         modelitem = self.channels[modelindex]
         modelitem.update(self.channel_to_model(channel))
 
@@ -138,7 +135,6 @@ class QEChannelListModel(QAbstractListModel, QtEventListener):
         self._logger.debug('new channel with cid %s' % cid)
         lnchannels = self.wallet.lnworker.channels
         for channel in lnchannels.values():
-            self._logger.debug(repr(channel))
             if cid == channel.channel_id.hex():
                 item = self.channel_to_model(channel)
                 self._logger.debug(item)

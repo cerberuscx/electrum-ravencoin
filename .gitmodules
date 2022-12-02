@@ -5,7 +5,7 @@
 	path = contrib/osx/CalinsQRReader
 	url = https://github.com/spesmilo/CalinsQRReader
 [submodule "electrum/www"]
-	path = electrum/www
+	path = electrum/plugins/payserver/www
 	url = https://github.com/spesmilo/electrum-http.git
 [submodule "electrum/gui/kivy/theming/atlas"]
 	path = electrum/gui/kivy/theming/atlas

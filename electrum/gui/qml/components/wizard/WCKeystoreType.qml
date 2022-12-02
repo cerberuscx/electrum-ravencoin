@@ -4,7 +4,7 @@ import QtQuick.Controls 2.1
 WizardComponent {
     valid: keystoregroup.checkedButton !== null
 
-    onAccept: {
+    function apply() {
         wizard_data['keystore_type'] = keystoregroup.checkedButton.keystoretype
     }
 
@@ -27,13 +27,13 @@ WizardComponent {
             text: qsTr('I already have a seed')
         }
         RadioButton {
-            enabled: false
             ButtonGroup.group: keystoregroup
             property string keystoretype: 'masterkey'
             text: qsTr('Use a master key')
         }
         RadioButton {
             enabled: false
+            visible: false
             ButtonGroup.group: keystoregroup
             property string keystoretype: 'hardware'
             text: qsTr('Use a hardware device')

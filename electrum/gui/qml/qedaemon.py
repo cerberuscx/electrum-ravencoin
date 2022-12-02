@@ -1,32 +1,35 @@
 import os
-from decimal import Decimal
 
-from PyQt5.QtCore import pyqtProperty, pyqtSignal, pyqtSlot, QObject, QUrl
 from PyQt5.QtCore import Qt, QAbstractListModel, QModelIndex
+from PyQt5.QtCore import pyqtProperty, pyqtSignal, pyqtSlot, QObject
 
-from electrum.util import register_callback, get_new_wallet_name, WalletFileException, standardize_path
+from electrum.i18n import _
 from electrum.logging import get_logger
-from electrum.wallet import Wallet, Abstract_Wallet
-from electrum.storage import WalletStorage, StorageReadWriteError
-from electrum.wallet_db import WalletDB
+from electrum.util import WalletFileException, standardize_path
+from electrum.wallet import Abstract_Wallet
+from electrum.plugin import run_hook
+from electrum.lnchannel import ChannelState
 
+from .auth import AuthMixin, auth_protect
+from .qefx import QEFX
 from .qewallet import QEWallet
 from .qewalletdb import QEWalletDB
-from .qefx import QEFX
-from .auth import AuthMixin, auth_protect
+from .qewizard import QENewWalletWizard, QEServerConnectWizard
 
 # wallet list model. supports both wallet basenames (wallet file basenames)
 # and whole Wallet instances (loaded wallets)
 class QEWalletListModel(QAbstractListModel):
     _logger = get_logger(__name__)
-    def __init__(self, parent=None):
-        QAbstractListModel.__init__(self, parent)
-        self.wallets = []
 
     # define listmodel rolemap
     _ROLE_NAMES= ('name','path','active')
     _ROLE_KEYS = range(Qt.UserRole, Qt.UserRole + len(_ROLE_NAMES))
     _ROLE_MAP  = dict(zip(_ROLE_KEYS, [bytearray(x.encode()) for x in _ROLE_NAMES]))
+
+    def __init__(self, daemon, parent=None):
+        QAbstractListModel.__init__(self, parent)
+        self.daemon = daemon
+        self.reload()
 
     def rowCount(self, index):
         return len(self.wallets)
@@ -35,7 +38,7 @@ class QEWalletListModel(QAbstractListModel):
         return self._ROLE_MAP
 
     def data(self, index, role):
-        (wallet_name, wallet_path, wallet) = self.wallets[index.row()]
+        (wallet_name, wallet_path) = self.wallets[index.row()]
         role_index = role - Qt.UserRole
         role_name = self._ROLE_NAMES[role_index]
         if role_name == 'name':
@@ -43,37 +46,14 @@ class QEWalletListModel(QAbstractListModel):
         if role_name == 'path':
             return wallet_path
         if role_name == 'active':
-            return wallet != None
-
-    def add_wallet(self, wallet_path = None, wallet: Abstract_Wallet = None):
-        if wallet_path == None and wallet == None:
-            return
-        # only add wallet instance if instance not yet in model
-        if wallet:
-            for name,path,w in self.wallets:
-                if w == wallet:
-                    return
-        self.beginInsertRows(QModelIndex(), len(self.wallets), len(self.wallets));
-        if wallet == None:
-            wallet_name = os.path.basename(wallet_path)
-        else:
-            wallet_name = wallet.basename()
-        item = (wallet_name, wallet_path, wallet)
-        self.wallets.append(item);
-        self.endInsertRows();
-
-class QEAvailableWalletListModel(QEWalletListModel):
-    def __init__(self, daemon, parent=None):
-        QEWalletListModel.__init__(self, parent)
-        self.daemon = daemon
-        self.reload()
+            return self.daemon.get_wallet(wallet_path) is not None
 
     @pyqtSlot()
     def reload(self):
-        if len(self.wallets) > 0:
-            self.beginRemoveRows(QModelIndex(), 0, len(self.wallets) - 1)
-            self.wallets = []
-            self.endRemoveRows()
+        self._logger.debug('enumerating available wallets')
+        self.beginResetModel()
+        self.wallets = []
+        self.endResetModel()
 
         available = []
         wallet_folder = os.path.dirname(self.daemon.config.get_wallet_path())
@@ -83,13 +63,48 @@ class QEAvailableWalletListModel(QEWalletListModel):
                     available.append(i.path)
         for path in sorted(available):
             wallet = self.daemon.get_wallet(path)
-            self.add_wallet(wallet_path = path, wallet = wallet)
+            self.add_wallet(wallet_path = path)
+
+    def add_wallet(self, wallet_path):
+        self.beginInsertRows(QModelIndex(), len(self.wallets), len(self.wallets))
+        wallet_name = os.path.basename(wallet_path)
+        wallet_path = standardize_path(wallet_path)
+        item = (wallet_name, wallet_path)
+        self.wallets.append(item)
+        self.endInsertRows()
+
+    def remove_wallet(self, path):
+        i = 0
+        wallets = []
+        remove = -1
+        for wallet_name, wallet_path in self.wallets:
+            if wallet_path == path:
+                remove = i
+            else:
+                self._logger.debug('HM, %s is not %s', wallet_path, path)
+                wallets.append((wallet_name, wallet_path))
+            i += 1
+
+        if remove >= 0:
+            self.beginRemoveRows(QModelIndex(), i, i)
+            self.wallets = wallets
+            self.endRemoveRows()
 
     def wallet_name_exists(self, name):
-        for wallet_name, wallet_path, wallet in self.wallets:
+        for wallet_name, wallet_path in self.wallets:
             if name == wallet_name:
                 return True
         return False
+
+    @pyqtSlot(str)
+    def updateWallet(self, path):
+        i = 0
+        for wallet_name, wallet_path in self.wallets:
+            if wallet_path == path:
+                mi = self.createIndex(i, i)
+                self.dataChanged.emit(mi, mi, self._ROLE_KEYS)
+                return
+            i += 1
 
 class QEDaemon(AuthMixin, QObject):
     def __init__(self, daemon, parent=None):
@@ -100,19 +115,23 @@ class QEDaemon(AuthMixin, QObject):
         self._walletdb.validPasswordChanged.connect(self.passwordValidityCheck)
 
     _logger = get_logger(__name__)
-    _loaded_wallets = QEWalletListModel()
     _available_wallets = None
     _current_wallet = None
+    _new_wallet_wizard = None
+    _server_connect_wizard = None
     _path = None
     _use_single_password = False
     _password = None
 
+    availableWalletsChanged = pyqtSignal()
+    fxChanged = pyqtSignal()
+    newWalletWizardChanged = pyqtSignal()
+    serverConnectWizardChanged = pyqtSignal()
+
     walletLoaded = pyqtSignal()
     walletRequiresPassword = pyqtSignal()
-    activeWalletsChanged = pyqtSignal()
-    availableWalletsChanged = pyqtSignal()
     walletOpenError = pyqtSignal([str], arguments=["error"])
-    fxChanged = pyqtSignal()
+    walletDeleteError = pyqtSignal([str,str], arguments=['code', 'message'])
 
     @pyqtSlot()
     def passwordValidityCheck(self):
@@ -123,8 +142,10 @@ class QEDaemon(AuthMixin, QObject):
     @pyqtSlot(str)
     @pyqtSlot(str, str)
     def load_wallet(self, path=None, password=None):
-        if path == None:
-            self._path = self.daemon.config.get('gui_last_wallet')
+        if path is None:
+            self._path = self.daemon.config.get('wallet_path') # command line -w option
+            if self._path is None:
+                self._path = self.daemon.config.get('gui_last_wallet')
         else:
             self._path = path
         if self._path is None:
@@ -136,7 +157,9 @@ class QEDaemon(AuthMixin, QObject):
         if not password:
             password = self._password
 
-        if self._path not in self.daemon._wallets:
+        wallet_already_open = self._path in self.daemon._wallets
+
+        if not wallet_already_open:
             # pre-checks, let walletdb trigger any necessary user interactions
             self._walletdb.path = self._path
             self._walletdb.password = password
@@ -146,10 +169,11 @@ class QEDaemon(AuthMixin, QObject):
 
         try:
             wallet = self.daemon.load_wallet(self._path, password)
-            if wallet != None:
-                self._loaded_wallets.add_wallet(wallet=wallet)
+            if wallet is not None:
                 self._current_wallet = QEWallet.getInstanceFor(wallet)
-                self._current_wallet.password = password
+                if not wallet_already_open:
+                    self.availableWallets.updateWallet(self._path)
+                    self._current_wallet.password = password
                 self.walletLoaded.emit()
 
                 if self.daemon.config.get('single_password'):
@@ -161,6 +185,7 @@ class QEDaemon(AuthMixin, QObject):
                     self._logger.info('use single password disabled by config')
 
                 self.daemon.config.save_last_wallet(wallet)
+                run_hook('load_wallet', wallet)
             else:
                 self._logger.info('could not open wallet')
                 self.walletOpenError.emit('could not open wallet')
@@ -169,17 +194,40 @@ class QEDaemon(AuthMixin, QObject):
             self.walletOpenError.emit(str(e))
 
     @pyqtSlot(QEWallet)
+    @pyqtSlot(QEWallet, bool)
+    @pyqtSlot(QEWallet, bool, bool)
+    def checkThenDeleteWallet(self, wallet, confirm_requests=False, confirm_balance=False):
+        if wallet.wallet.lnworker:
+            lnchannels = wallet.wallet.lnworker.get_channel_objects()
+            if any([channel.get_state() != ChannelState.REDEEMED for channel in lnchannels.values()]):
+                self.walletDeleteError.emit('unclosed_channels', _('There are still channels that are not fully closed'))
+                return
+
+        num_requests = len(wallet.wallet.get_unpaid_requests())
+        if num_requests > 0 and not confirm_requests:
+            self.walletDeleteError.emit('unpaid_requests', _('There are still unpaid requests. Really delete?'))
+            return
+
+        c, u, x = wallet.wallet.get_balance()
+        if c+u+x > 0 and not wallet.wallet.is_watching_only() and not confirm_balance:
+            self.walletDeleteError.emit('balance', _('There are still coins present in this wallet. Really delete?'))
+            return
+
+        self.delete_wallet(wallet)
+
     @auth_protect
     def delete_wallet(self, wallet):
-        path = wallet.wallet.storage.path
-        self._logger.debug('Ok to delete wallet with path %s' % path)
-        # TODO checks, e.g. existing LN channels, unpaid requests, etc
-        self._logger.debug('Not deleting yet, just unloading for now')
-        # TODO actually delete
-        # TODO walletLoaded signal is confusing
-        self.daemon.stop_wallet(path)
+        path = standardize_path(wallet.wallet.storage.path)
+        self._logger.debug('deleting wallet with path %s' % path)
         self._current_wallet = None
+        # TODO walletLoaded signal is confusing
         self.walletLoaded.emit()
+
+        if not self.daemon.delete_wallet(path):
+            self.walletDeleteError.emit('error', _('Problem deleting wallet'))
+            return
+
+        self.availableWallets.remove_wallet(path)
 
     @pyqtProperty('QString')
     def path(self):
@@ -189,14 +237,10 @@ class QEDaemon(AuthMixin, QObject):
     def currentWallet(self):
         return self._current_wallet
 
-    @pyqtProperty(QEWalletListModel, notify=activeWalletsChanged)
-    def activeWallets(self):
-        return self._loaded_wallets
-
-    @pyqtProperty(QEAvailableWalletListModel, notify=availableWalletsChanged)
+    @pyqtProperty(QEWalletListModel, notify=availableWalletsChanged)
     def availableWallets(self):
         if not self._available_wallets:
-            self._available_wallets = QEAvailableWalletListModel(self.daemon)
+            self._available_wallets = QEWalletListModel(self.daemon)
 
         return self._available_wallets
 
@@ -223,16 +267,29 @@ class QEDaemon(AuthMixin, QObject):
     requestNewPassword = pyqtSignal()
     @pyqtSlot()
     @auth_protect
-    def start_change_password(self):
+    def startChangePassword(self):
         if self._use_single_password:
             self.requestNewPassword.emit()
         else:
             self.currentWallet.requestNewPassword.emit()
 
     @pyqtSlot(str)
-    def set_password(self, password):
+    def setPassword(self, password):
         assert self._use_single_password
         self._logger.debug('about to set password for ALL wallets')
         self.daemon.update_password_for_directory(old_password=self._password, new_password=password)
         self._password = password
 
+    @pyqtProperty(QENewWalletWizard, notify=newWalletWizardChanged)
+    def newWalletWizard(self):
+        if not self._new_wallet_wizard:
+            self._new_wallet_wizard = QENewWalletWizard(self)
+
+        return self._new_wallet_wizard
+
+    @pyqtProperty(QEServerConnectWizard, notify=serverConnectWizardChanged)
+    def serverConnectWizard(self):
+        if not self._server_connect_wizard:
+            self._server_connect_wizard = QEServerConnectWizard(self)
+
+        return self._server_connect_wizard

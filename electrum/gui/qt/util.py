@@ -13,6 +13,7 @@ from functools import partial, lru_cache, wraps
 from typing import (NamedTuple, Callable, Optional, TYPE_CHECKING, Union, List, Dict, Any,
                     Sequence, Iterable, Tuple)
 
+from PyQt5 import QtWidgets, QtCore
 from PyQt5.QtGui import (QFont, QColor, QCursor, QPixmap, QStandardItem, QImage,
                          QPalette, QIcon, QFontMetrics, QShowEvent, QPainter, QHelpEvent)
 from PyQt5.QtCore import (Qt, QPersistentModelIndex, QModelIndex, pyqtSignal,
@@ -25,7 +26,7 @@ from PyQt5.QtWidgets import (QPushButton, QLabel, QMessageBox, QHBoxLayout,
                              QFileDialog, QWidget, QToolButton, QTreeView, QPlainTextEdit,
                              QHeaderView, QApplication, QToolTip, QTreeWidget, QStyledItemDelegate,
                              QMenu, QStyleOptionViewItem, QLayout, QLayoutItem, QAbstractButton,
-                             QGraphicsEffect, QGraphicsScene, QGraphicsPixmapItem, QFrame)
+                             QGraphicsEffect, QGraphicsScene, QGraphicsPixmapItem, QSizePolicy, QFrame)
 
 from electrum.i18n import _, languages
 from electrum.util import FileImportFailed, FileExportFailed, make_aiohttp_session, resource_path
@@ -109,6 +110,13 @@ class WWLabel(QLabel):
     def __init__ (self, text="", parent=None):
         QLabel.__init__(self, text, parent)
         self.setWordWrap(True)
+        self.setTextInteractionFlags(Qt.TextSelectableByMouse)
+
+
+class AmountLabel(QLabel):
+    def __init__(self, *args, **kwargs):
+        QLabel.__init__(self, *args, **kwargs)
+        self.setFont(QFont(MONOSPACE_FONT))
         self.setTextInteractionFlags(Qt.TextSelectableByMouse)
 
 
@@ -1453,10 +1461,11 @@ def read_QIcon(icon_basename):
     return QIcon(icon_path(icon_basename))
 
 class IconLabel(QWidget):
-    IconSize = QSize(16, 16)
     HorizontalSpacing = 2
     def __init__(self, *, text='', final_stretch=True):
         super(QWidget, self).__init__()
+        size = max(16, font_height())
+        self.icon_size = QSize(size, size)
         layout = QHBoxLayout()
         layout.setContentsMargins(0, 0, 0, 0)
         self.setLayout(layout)
@@ -1471,7 +1480,7 @@ class IconLabel(QWidget):
     def setText(self, text):
         self.label.setText(text)
     def setIcon(self, icon):
-        self.icon.setPixmap(icon.pixmap(self.IconSize))
+        self.icon.setPixmap(icon.pixmap(self.icon_size))
         self.icon.repaint()  # macOS hack for #6269
 
 def get_default_language():
@@ -1483,6 +1492,10 @@ def char_width_in_lineedit() -> int:
     char_width = QFontMetrics(QLineEdit().font()).averageCharWidth()
     # 'averageCharWidth' seems to underestimate on Windows, hence 'max()'
     return max(9, char_width)
+
+
+def font_height() -> int:
+    return QFontMetrics(QLabel().font()).height()
 
 
 def webopen(url: str):
@@ -1621,50 +1634,11 @@ class ImageGraphicsEffect(QObject):
         return result
 
 
-# vertical tabs
-# from https://stackoverflow.com/questions/51230544/pyqt5-how-to-set-tabwidget-west-but-keep-the-text-horizontal
-from PyQt5 import QtWidgets, QtCore
-
-class VTabBar(QtWidgets.QTabBar):
-
-    def tabSizeHint(self, index):
-        s = QtWidgets.QTabBar.tabSizeHint(self, index)
-        s.transpose()
-        return s
-
-    def paintEvent(self, event):
-        painter = QtWidgets.QStylePainter(self)
-        opt = QtWidgets.QStyleOptionTab()
-
-        for i in range(self.count()):
-            self.initStyleOption(opt, i)
-            painter.drawControl(QtWidgets.QStyle.CE_TabBarTabShape, opt)
-            painter.save()
-
-            s = opt.rect.size()
-            s.transpose()
-            r = QtCore.QRect(QtCore.QPoint(), s)
-            r.moveCenter(opt.rect.center())
-            opt.rect = r
-
-            c = self.tabRect(i).center()
-            painter.translate(c)
-            painter.rotate(90)
-            painter.translate(-c)
-            painter.drawControl(QtWidgets.QStyle.CE_TabBarTabLabel, opt);
-            painter.restore()
-
-
-class VTabWidget(QtWidgets.QTabWidget):
-    def __init__(self, *args, **kwargs):
-        QtWidgets.QTabWidget.__init__(self, *args, **kwargs)
-        self.setTabBar(VTabBar(self))
-        self.setTabPosition(QtWidgets.QTabWidget.West)
-
+class SquareTabWidget(QtWidgets.QStackedWidget):
     def resizeEvent(self, e):
         # keep square aspect ratio when resized
         size = e.size()
-        w = self.tabBar().width() + size.height()
+        w = size.height()
         self.setFixedWidth(w)
         return super().resizeEvent(e)
 
@@ -1689,6 +1663,66 @@ class QVSeperationLine(QFrame):
         self.setSizePolicy(QtWidgets.QSizePolicy.Minimum, QtWidgets.QSizePolicy.Preferred)
         self.setStyleSheet(ColorScheme.GRAY.as_stylesheet(True))
         
+class VTabWidget(QWidget):
+    """QtWidgets.QTabWidget alternative with "West" tab positions and horizontal tab-text."""
+    def __init__(self):
+        QWidget.__init__(self)
+
+        hbox = QHBoxLayout()
+        self.setLayout(hbox)
+        hbox.setContentsMargins(0, 0, 0, 0)
+        hbox.setSpacing(0)
+
+        self._tabs_vbox = tabs_vbox = QVBoxLayout()
+        self._tab_btns = []  # type: List[QPushButton]
+        tabs_vbox.setContentsMargins(0, 0, 0, 0)
+        tabs_vbox.setSpacing(0)
+
+        _tabs_vbox_outer_w = QWidget()
+        _tabs_vbox_outer = QVBoxLayout()
+        _tabs_vbox_outer_w.setLayout(_tabs_vbox_outer)
+        _tabs_vbox_outer_w.setSizePolicy(QSizePolicy(QSizePolicy.Maximum, _tabs_vbox_outer_w.sizePolicy().verticalPolicy()))
+        _tabs_vbox_outer.setContentsMargins(0, 0, 0, 0)
+        _tabs_vbox_outer.setSpacing(0)
+        _tabs_vbox_outer.addLayout(tabs_vbox)
+        _tabs_vbox_outer.addStretch(1)
+
+        self.content_w = content_w = SquareTabWidget()
+        content_w.setStyleSheet("SquareTabWidget {padding:0px; }")
+        hbox.addStretch(1)
+        hbox.addWidget(_tabs_vbox_outer_w)
+        hbox.addWidget(content_w)
+
+        self.currentChanged = content_w.currentChanged
+        self.currentIndex = content_w.currentIndex
+
+    def addTab(self, widget: QWidget, icon: QIcon, text: str):
+        btn = QPushButton(icon, text)
+        btn.setStyleSheet("QPushButton { text-align: left; }")
+        btn.setFocusPolicy(QtCore.Qt.NoFocus)
+        btn.setCheckable(True)
+        btn.setSizePolicy(QSizePolicy.Preferred, btn.sizePolicy().verticalPolicy())
+
+        def on_btn_click():
+            btn.setChecked(True)
+            for btn2 in self._tab_btns:
+                if btn2 != btn:
+                    btn2.setChecked(False)
+            self.content_w.setCurrentIndex(idx)
+        btn.clicked.connect(on_btn_click)
+        idx = len(self._tab_btns)
+        self._tab_btns.append(btn)
+
+        self._tabs_vbox.addWidget(btn)
+        self.content_w.addWidget(widget)
+
+    def setTabIcon(self, idx: int, icon: QIcon):
+        self._tab_btns[idx].setIcon(icon)
+
+    def setCurrentIndex(self, idx: int):
+        self._tab_btns[idx].click()
+
+
 class QtEventListener(EventListener):
 
     qt_callback_signal = QtCore.pyqtSignal(tuple)

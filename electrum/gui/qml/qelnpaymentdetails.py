@@ -1,10 +1,10 @@
 from PyQt5.QtCore import pyqtProperty, pyqtSignal, pyqtSlot, QObject
 
 from electrum.logging import get_logger
-from electrum.util import format_time, bfh, format_time
+from electrum.util import bfh, format_time
 
-from .qewallet import QEWallet
 from .qetypes import QEAmount
+from .qewallet import QEWallet
 
 class QELnPaymentDetails(QObject):
     def __init__(self, parent=None):
@@ -85,10 +85,6 @@ class QELnPaymentDetails(QObject):
     def update(self):
         if self._wallet is None:
             self._logger.error('wallet undefined')
-            return
-
-        if self._key not in self._wallet.wallet.lnworker.payment_info:
-            self._logger.error('payment_hash not found')
             return
 
         # TODO this is horribly inefficient. need a payment getter/query method

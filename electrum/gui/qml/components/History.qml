@@ -6,17 +6,49 @@ import QtQml.Models 2.2
 
 import org.electrum 1.0
 
+import "controls"
+
 Pane {
     id: rootItem
-    visible: Daemon.currentWallet !== undefined
+    visible: Daemon.currentWallet
+    padding: 0
     clip: true
+
+    background: Rectangle {
+        color: constants.darkerBackground
+    }
 
     ListView {
         id: listview
         width: parent.width
         height: parent.height
+        boundsBehavior: Flickable.StopAtBounds
 
         model: visualModel
+
+        header: Item {
+            width: parent.width
+            height: headerLayout.height
+            ColumnLayout {
+                id: headerLayout
+                anchors.centerIn: parent
+                BalanceSummary {
+                    Layout.topMargin: constants.paddingXLarge
+                    Layout.bottomMargin: constants.paddingXLarge
+                }
+            }
+        }
+        headerPositioning: ListView.InlineHeader
+
+        readonly property variant sectionLabels: {
+            'local': qsTr('Local'),
+            'mempool': qsTr('Mempool'),
+            'today': qsTr('Today'),
+            'yesterday': qsTr('Yesterday'),
+            'lastweek': qsTr('Last week'),
+            'lastmonth': qsTr('Last month'),
+            'older': qsTr('Older')
+        }
 
         section.property: 'section'
         section.criteria: ViewSection.FullString
@@ -24,15 +56,7 @@ Pane {
             width: ListView.view.width
             required property string section
             Label {
-                text: section == 'today'
-                        ? qsTr('Today')
-                        : section == 'yesterday'
-                            ? qsTr('Yesterday')
-                            : section == 'lastweek'
-                                ? qsTr('Last week')
-                                : section == 'lastmonth'
-                                    ? qsTr('Last month')
-                                    : qsTr('Older')
+                text: listview.sectionLabels[section]
                 Layout.alignment: Qt.AlignHCenter
                 Layout.topMargin: constants.paddingLarge
                 font.pixelSize: constants.fontSizeLarge
@@ -52,154 +76,54 @@ Pane {
                 DelegateModelGroup { name: 'older'; includeByDefault: false }
             ]
 
-            delegate: Item {
-                id: delegate
-                width: ListView.view.width
-                height: delegateLayout.height
-
-                ColumnLayout {
-                    id: delegateLayout
-                    width: parent.width
-                    spacing: 0
-
-                    ItemDelegate {
-                        Layout.fillWidth: true
-                        Layout.preferredHeight: txinfo.height
-
-                        onClicked: {
-                            if (model.lightning) {
-                                var page = app.stack.push(Qt.resolvedUrl('LightningPaymentDetails.qml'), {'key': model.key})
-                                page.detailsChanged.connect(function() {
-                                    // update listmodel when details change
-                                    visualModel.model.update_tx_label(model.key, page.label)
-                                })
-                            } else {
-                                var page = app.stack.push(Qt.resolvedUrl('TxDetails.qml'), {'txid': model.key})
-                                page.detailsChanged.connect(function() {
-                                    // update listmodel when details change
-                                    visualModel.model.update_tx_label(model.key, page.label)
-                                })
-                            }
-                        }
-
-                        GridLayout {
-                            id: txinfo
-                            columns: 3
-
-                            x: constants.paddingSmall
-                            width: delegate.width - 2*constants.paddingSmall
-
-                            Item { Layout.columnSpan: 3; Layout.preferredWidth: 1; Layout.preferredHeight: 1}
-
-                            Image {
-                                readonly property variant tx_icons : [
-                                    "../../../gui/icons/unconfirmed.png",
-                                    "../../../gui/icons/clock1.png",
-                                    "../../../gui/icons/clock2.png",
-                                    "../../../gui/icons/clock3.png",
-                                    "../../../gui/icons/clock4.png",
-                                    "../../../gui/icons/clock5.png",
-                                    "../../../gui/icons/confirmed_bw.png"
-                                ]
-
-                                Layout.preferredWidth: constants.iconSizeLarge
-                                Layout.preferredHeight: constants.iconSizeLarge
-                                Layout.alignment: Qt.AlignVCenter
-                                Layout.rowSpan: 2
-                                source: model.lightning ? "../../../gui/icons/lightning.png" : tx_icons[Math.min(6,model.confirmations)]
-                            }
-
-                            Label {
-                                Layout.fillWidth: true
-                                font.pixelSize: model.label !== '' ? constants.fontSizeLarge : constants.fontSizeMedium
-                                text: model.label !== '' ? model.label : '<no label>'
-                                color: model.label !== '' ? Material.foreground : constants.mutedForeground
-                                wrapMode: Text.Wrap
-                                maximumLineCount: 2
-                                elide: Text.ElideRight
-                            }
-                            Label {
-                                id: valueLabel
-                                font.family: FixedFont
-                                font.pixelSize: constants.fontSizeMedium
-                                Layout.alignment: Qt.AlignRight
-                                font.bold: true
-                                color: model.incoming ? constants.colorCredit : constants.colorDebit
-
-                                function updateText() {
-                                    text = Config.formatSats(model.value)
-                                }
-                                Component.onCompleted: updateText()
-                            }
-                            Label {
-                                font.pixelSize: constants.fontSizeSmall
-                                text: model.date
-                                color: constants.mutedForeground
-                            }
-                            Label {
-                                id: fiatLabel
-                                font.pixelSize: constants.fontSizeSmall
-                                Layout.alignment: Qt.AlignRight
-                                color: constants.mutedForeground
-
-                                function updateText() {
-                                    if (!Daemon.fx.enabled) {
-                                        text = ''
-                                    } else if (Daemon.fx.historicRates) {
-                                        text = Daemon.fx.fiatValueHistoric(model.value, model.timestamp) + ' ' + Daemon.fx.fiatCurrency
-                                    } else {
-                                        text = Daemon.fx.fiatValue(model.value, false) + ' ' + Daemon.fx.fiatCurrency
-                                    }
-                                }
-                                Component.onCompleted: updateText()
-                            }
-                            Item { Layout.columnSpan: 3; Layout.preferredWidth: 1; Layout.preferredHeight: 1 }
-                        }
-                    }
-
-                    Rectangle {
-                        visible: delegate.ListView.section == delegate.ListView.nextSection
-                        Layout.fillWidth: true
-                        Layout.preferredHeight: constants.paddingTiny
-                        color: Qt.rgba(0,0,0,0.10)
-                    }
-
-                }
-                // as the items in the model are not bindings to QObjects,
-                // hook up events that might change the appearance
-                Connections {
-                    target: Config
-                    function onBaseUnitChanged() { valueLabel.updateText() }
-                    function onThousandsSeparatorChanged() { valueLabel.updateText() }
-                }
-
-                Connections {
-                    target: Daemon.fx
-                    function onHistoricRatesChanged() { fiatLabel.updateText() }
-                    function onQuotesUpdated() { fiatLabel.updateText() }
-                    function onHistoryUpdated() { fiatLabel.updateText() }
-                    function onEnabledUpdated() { fiatLabel.updateText() }
-                }
-
-                Component.onCompleted: {
-                    if (model.section == 'today') {
-                        delegate.DelegateModel.inToday = true
-                    } else if (model.section == 'yesterday') {
-                        delegate.DelegateModel.inYesterday = true
-                    } else if (model.section == 'lastweek') {
-                        delegate.DelegateModel.inLastweek = true
-                    } else if (model.section == 'lastmonth') {
-                        delegate.DelegateModel.inLastmonth = true
-                    } else if (model.section == 'older') {
-                        delegate.DelegateModel.inOlder = true
-                    }
-                }
-
-            } // delegate
+            delegate: HistoryItemDelegate {
+            }
         }
 
         ScrollIndicator.vertical: ScrollIndicator { }
 
+    }
+
+    MouseArea {
+        id: vdragscroll
+        anchors {
+            top: listview.top
+            right: listview.right
+            bottom: listview.bottom
+        }
+        width: constants.paddingXXLarge
+        drag.target: dragb
+        onPressedChanged: if (pressed) {
+            dragb.y = mouseY + listview.y - dragb.height/2
+        }
+    }
+
+    Rectangle {
+        id: dragb
+        anchors.right: vdragscroll.left
+        width: postext.width + constants.paddingXXLarge
+        height: postext.height + constants.paddingXXLarge
+        radius: constants.paddingXSmall
+
+        color: constants.colorAlpha(Material.accentColor, 0.33)
+        border.color: Material.accentColor
+        opacity : vdragscroll.drag.active ? 1 : 0
+        Behavior on opacity { NumberAnimation { duration: 300 } }
+
+        onYChanged: {
+            if (vdragscroll.drag.active) {
+                listview.contentY =
+                    Math.max(listview.originY,
+                    Math.min(listview.contentHeight - listview.height + listview.originY,
+                        ((y-listview.y)/(listview.height - dragb.height)) * (listview.contentHeight - listview.height + listview.originY) ))
+            }
+        }
+        Label {
+            id: postext
+            anchors.centerIn: parent
+            text: listview.itemAt(0,listview.contentY + (dragb.y + dragb.height/2)).delegateModel.date
+            font.pixelSize: constants.fontSizeLarge
+        }
     }
 
     Connections {
