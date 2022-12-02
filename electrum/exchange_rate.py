@@ -243,6 +243,7 @@ def get_exchanges_and_currencies():
             d[name] = await exchange.get_currencies()
             print(name, "ok")
         except:
+            d[name] = []
             print(name, "error")
 
     async def query_all_exchanges_for_their_ccys_over_network():
