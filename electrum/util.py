@@ -1207,7 +1207,7 @@ _block_explorer_default_api_loc = {'tx': 'tx/', 'addr': 'address/'}
 ipfs_explorers = {
     'ipfs.io': ('https://ipfs.io/',
                 {'ipfs': 'ipfs/'}),
-    'infura.io': ('https://ipfs.infura.io/',
+    'infura.io': ('https://infura-ipfs.io/',
                   {'ipfs': 'ipfs/'}),
     'ravencoinipfs-gateway.com': ('https://ravencoinipfs-gateway.com/',
                                   {'ipfs': 'ipfs/'}),
